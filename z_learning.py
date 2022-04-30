@@ -31,7 +31,7 @@ def get_neighbor_indices(query, rows, cols):
 
 
 def create_grid_map(rows, cols, occupancy=0.3):
-    torch.manual_seed(0)
+    # torch.manual_seed(0)
     M = torch.rand(rows, cols)
     M[M <= occupancy] = 0
     M[M > 0] = 1
@@ -51,12 +51,17 @@ def create_transition_matrix(M, be_trapped=False):
     p_{ij} is the transition probability from i to j of M.flatten
     """
     rows, cols = M.size()
-    P = torch.eye(rows * cols, rows * cols)
+    P = torch.zeros(rows * cols, rows * cols)
     for i in range(P.size()[0]):
         neighbor_indices = get_neighbor_indices(i, rows, cols)
         for j in neighbor_indices:
             P[i, j] = M[int(j / cols), j - int(j / cols) * cols]
 
+    # Make sure that all rows are non-zero. If there is no feasible neighbor, 'setting pii to be one' means the robot will
+    # stay at state i for ever.
+    for i in range(rows * cols):
+        if P[i, :].max() == 0:
+            P[i, i] = 1.0
     # Trap at the bottom right corner
     if be_trapped:
         P[-1, :] = 0
@@ -65,8 +70,6 @@ def create_transition_matrix(M, be_trapped=False):
 
 
 def z_learning(P, zf, q, max_num_iters=10):
-    """ 
-    """
     p = torch.exp(-q)
     G = torch.diag(p.squeeze())
 
@@ -78,13 +81,13 @@ def z_learning(P, zf, q, max_num_iters=10):
     converged = False
     while iter < max_num_iters:
         z_new = G @ P @ z
-        diff = (z - z_new).norm()
-        converged = diff < 1e-20
+        diff = (z - z_new).abs().max()
+        converged = (diff < 1e-20)
+        if iter % 100 == 0:
+            print(f"{iter}: {diff}")
         z = z_new
         if converged:
             break
-        if iter % 100 == 0:
-            print(f"{iter}: {diff}")
 
         iter += 1
-    return z
+    return torch.t(z)
