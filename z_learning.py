@@ -70,17 +70,24 @@ def create_transition_matrix(M, be_trapped=False):
 
 
 def z_learning(P, zf, q, max_num_iters=10):
-    p = torch.exp(-q)
-    G = torch.diag(p.squeeze())
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(device)
+    P_ = P.clone().detach().to(device)
+    p = torch.exp(-q).to(device)
+    G = torch.diag(p.squeeze()).to(device)
 
     assert G.size() == P.size(
     ), f"G.size() = {G.size()} vs P.size() = {P.size()}"
-    # right product!
-    z = torch.t(zf)
+    z = torch.t(zf).to(device)
+
+    # L, V = torch.linalg.eig(G @ P)
+    # ind = (torch.argmax(torch.real(L)))
+    # return torch.real(V[:, ind]).reshape(1, -1)
+
     iter = 0
     converged = False
     while iter < max_num_iters:
-        z_new = G @ P @ z
+        z_new = G @ P_ @ z
         diff = (z - z_new).abs().max()
         converged = (diff < 1e-20)
         if iter % 100 == 0:
@@ -90,4 +97,4 @@ def z_learning(P, zf, q, max_num_iters=10):
             break
 
         iter += 1
-    return torch.t(z)
+    return torch.t(z).to(P.device)
