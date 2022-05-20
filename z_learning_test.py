@@ -4,60 +4,18 @@ import z_learning as zl
 
 import matplotlib.pyplot as plt
 import torch
-from matplotlib import animation
-from random import choices
+from random import choices, random
 
-
-def viz_state_prob(M, state_prob_history, blit=False, save=False):
-    num_rows, num_cols = M.size()
-    num_steps = len(state_prob_history)
-    fig, ax = plt.subplots(figsize=(10, 8))
-    fig.tight_layout()
-    zl.viz_mat(M, ax, alpha=0.5)
-
-    def init():
-        patch = plt.Rectangle((0, 0),
-                              1, 1,
-                              fc='red',
-                              ec=None,
-                              lw=1)
-        ax.add_patch(patch)
-        return patch,
-
-    def animate(i):
-        state_prob = state_prob_history[i].squeeze()
-        state_inds = torch.arange(state_prob.size()[0])[state_prob > 1e-2]
-        patches = []
-        for ind in state_inds.tolist():
-            row = int(ind / num_cols)
-            col = ind - row * num_cols
-            patch = plt.Rectangle((col, row),
-                                  1, 1,
-                                  fc='red',
-                                  ec=None,
-                                  lw=1,
-                                  alpha=state_prob[ind].item())
-            ax.add_patch(patch)
-            patches.append(patch)
-        return patches
-
-    anim = animation.FuncAnimation(fig, animate,
-                                   init_func=init,
-                                   frames=num_steps,
-                                   interval=50,
-                                   blit=blit,
-                                   repeat=True)
-
-    # anim.save("anim.gif", writer="imagemagick")
-    if save:
-        writervideo = animation.FFMpegWriter(fps=60)
-        anim.save("anim.mp4", writer=writervideo)
-    plt.show()
-
-
+def make_initial_z(num_rows, num_cols):
+    z = torch.zeros(1, num_rows * num_cols)
+    for i in range(num_rows):
+        for j in range(num_cols):
+            z[0, i * num_cols + j] = num_rows - 1 - i + num_cols - 1 - j
+    return torch.exp(-z)
+        
 class TestZLearning(unittest.TestCase):
     def my_setup(self, rows=5, cols=5, occupancy=0.3):
-        M = zl.create_grid_map(rows, cols, occupancy=0.3)
+        M = zl.create_grid_map(rows, cols, occupancy=occupancy)
         P = zl.create_transition_matrix(M, be_trapped=True)
         x0 = torch.zeros_like(P[0, :])
         x0[0] = 1
@@ -123,20 +81,20 @@ class TestZLearning(unittest.TestCase):
             x[x > 0.0] = 0
             x[..., sample_index.item()] = 1.0
             state_prob_history.append(x.clone().detach())
-        viz_state_prob(M, state_prob_history)
+        zl.viz_state_prob(M, state_prob_history)
 
     @unittest.skip
-    def test_z_learning(self):
+    def test_sto_solver(self):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         print(device)
-        num_rows, num_cols = 50, 50
+        num_rows, num_cols = 20, 20
         M, P, x0 = self.my_setup(num_rows, num_cols, occupancy=0.3)
         rho = 0.0
         q = torch.ones_like(x0.squeeze()) * rho
         q[-1] = 0
         zf = torch.zeros_like(x0)
         zf[0, -1] = 1.0
-        z = zl.z_learning(P, zf, q, max_num_iters=1e2)
+        z = zl.sto_solver(P, zf, q, max_num_iters=1e2)
         # c = - torch.log(z) / rho
 
         num_steps = (num_cols + num_rows) * 2
@@ -145,12 +103,57 @@ class TestZLearning(unittest.TestCase):
         P = P.to(device)
 
         state_prob_history = [x.clone().detach()]
+        P_star = (P @ Z)
         for i in range(num_steps):
-            x = x @ (P @ Z)
+            x = x @ P_star
             x = x / x.sum()  # normalization
             state_prob_history.append(x.clone().detach())
 
-        viz_state_prob(M, state_prob_history, blit=False, save=False)
+        zl.viz_state_prob(M, state_prob_history, blit=False, save=False)
+
+    @unittest.skip
+    def test_single_rollout(self):
+        # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        # print(device)
+        num_rows, num_cols = 20, 20
+        M, P, x0 = self.my_setup(num_rows, num_cols, occupancy=0.3)
+        rho = 0.0
+        rollout = zl.single_rollout(x0, P, rho, num_steps=1000)
+        zl.viz_state_prob(M, [srs[0] for srs in rollout], blit=True)
+
+    # @unittest.skip
+    def test_z_learnging(self):
+        num_rows, num_cols = 20, 20
+        M, P, x0 = self.my_setup(num_rows, num_cols, occupancy=0.3)
+        rho = 10.0
+        x = x0.clone().detach()
+        indices = torch.arange(P.size()[0])
+        q = torch.ones_like(x0.squeeze()) * rho
+        q[-1] = 0
+        G = torch.diag(torch.exp(-q).squeeze())
+
+        z = make_initial_z(num_rows, num_cols)
+
+        alpha = 0.9
+        def callback(frame_ind):
+            nonlocal x, indices, P, G, z, alpha, x0
+            i = torch.argmax(x[0, :]).item()
+            if i == x.size()[1] - 1:
+                x = x0.clone().detach()
+                i = 0
+
+            x_next_rand = (x @ P)
+            x_next_opt = x_next_rand * z
+            #
+            x_next = x_next_rand if random() > 0.8 else x_next_opt
+            j = choices(indices, x_next[0, :])[0].item()
+            z[..., i] = (1-alpha) * z[..., i] + alpha * G[i, i] * z[0, j]
+
+            x = torch.zeros_like(x0)
+            x[0, j] = 1.0
+            return x.squeeze(), z.squeeze()
+        
+        zl.simulation(M, callback, num_steps=100, blit=True, repeat=True, save=False)
 
 
 if __name__ == '__main__':
